@@ -12,7 +12,7 @@ class PulsarCatalog:
     Loads all data from the ATNF catalog and contains various methods to manipulate this data with users' desired constraints
     """
 
-    def __init__(self, download=True):
+    def __init__(self, download=False, correct_for_pm=True):
         if download:
             # Runs if you don't have a recently downloaded version of the ATNF catalog.
             # Turn this off if you already have a downloaded catalog as it slows the code down quite a bit.
@@ -43,7 +43,7 @@ class PulsarCatalog:
         raj_err = np.asarray(table['RAJ_ERR'])
         self.raj_err = np.nan_to_num(raj_err)
         decj_err = np.asarray(table['DECJ_ERR'])
-        self.decj_err = np.nan_to_num(decj_err)
+        self.decj_err = np.nan_to_num(decj_err) # if pm correction on
 
         # Epoch of position, defaults to PEpoch (MJD)
         self.pos_epoch = np.asarray(table['POSEPOCH'])
@@ -58,22 +58,115 @@ class PulsarCatalog:
         self.bnames = np.asarray(table['BNAME'])
         self.jnames = np.asarray(table['JNAME'])
 
-        # Proper motion of RA
+        # Proper motion of RA in degrees
         pm_ra = np.asarray(table['PMRA'])
-        self.pm_ra = np.nan_to_num(pm_ra)
+        self.pm_ra = np.nan_to_num(pm_ra) / 3.6e6 # converting to degrees and removing nans
 
-        # Proper motion of DEC
+        # Proper motion of DEC in degrees
         pm_dec = np.asarray(table['PMDEC'])
-        self.pm_dec = np.nan_to_num(pm_dec)
+        self.pm_dec = np.nan_to_num(pm_dec) / 3.6e6 # converting to degrees and removing nans
+
+        # Proper motion of RA in degrees
+        pm_ra_err = np.asarray(table['PMRA_ERR'])
+        self.pm_ra_err_mas = pm_ra_err
+        self.pm_ra_err_deg = np.nan_to_num(pm_ra_err) / 3.6e6 # converting to degrees and removing nans
+
+        # Proper motion of DEC in degrees
+        pm_dec_err = np.asarray(table['PMDEC_ERR'])
+        self.pm_dec_err_mas = pm_dec_err
+        self.pm_dec_err_deg = np.nan_to_num(pm_dec_err) / 3.6e6 # converting to degrees and removing nans
+
+        # time of position observation (MJD)
+        time_pos = np.asarray(table['POSEPOCH'])
+        self.time_pos = np.nan_to_num(time_pos)
+
+        # time of period observation (MJD)
+        time_per = np.asarray(table['PEPOCH'])
+        self.time_per = np.nan_to_num(time_per)
+
+        fluxes = np.asarray(table['S400'])
+        self.fluxes = fluxes
+        self.convert()
+
+        if correct_for_pm:
+            self.correct_pm()
 
     def get_names_pos_unc(self):
-        self.convert()
+        """
+        This method grabs all pulsar names, corrected RA/DEC for PM and the corresponding error.
+        It returns two dictionaries with keys as the b or j pulsar names and values as the ra and dec
+        error in milliarcseconds.
+        """
         j_name_dict = {}
         b_name_dict = {}
-        for bname, jname, ra, dec in zip(self.bnames, self.jnames, self.raj_err_mas, self.decj_err_mas):
-            b_name_dict[bname] = [ra, dec]
-            j_name_dict[jname] = [ra, dec]
+        for bname, jname, ra_err, dec_err, pm_ra_err, pm_dec_err, ra, dec in zip(self.bnames, self.jnames, self.raj_err_mas, self.decj_err_mas, self.pm_ra_err_mas, self.pm_dec_err_mas, self.rajd, self.decjd):
+            # Adding pm and RA/DEC errors in quadrature as total error in RA/DEC
+            ra_err_quad = np.sqrt(ra_err**2 + pm_ra_err**2)
+            dec_err_quad = np.sqrt(dec_err**2 + pm_dec_err**2)
+            b_name_dict[bname] = [ra_err_quad, dec_err_quad, (ra, dec)]
+            j_name_dict[jname] = [ra_err_quad, dec_err_quad, (ra, dec)]
         return b_name_dict, j_name_dict
+
+    def get_julian_datetime(self):
+        """
+        Help from: https://stackoverflow.com/questions/31142181/calculating-julian-date-in-python
+        Reference: http://scienceworld.wolfram.com/astronomy/JulianDate.html, equation ()
+
+        Gets current JD time.
+
+        date: datetime object of date in question
+
+        :return: JD time of input datetime object
+
+        Raises:
+            TypeError : Incorrect parameter type if not datetime
+            ValueError: Date out of range of equation (note between 1901 and 2099)
+        """
+        date = datetime.datetime.utcnow()
+
+        # Ensures correct format
+        if not isinstance(date, datetime.datetime):
+            raise TypeError('Invalid type for parameter "date" - expecting datetime')
+        elif date.year < 1901 or date.year > 2099:
+            raise ValueError('Datetime must be between year 1801 and 2099')
+
+        # Calculated JD using the reference
+        julian_datetime = 367 * date.year - int((7 * (date.year + int((date.month + 9) / 12.0))) / 4.0) \
+                          + int((275 * date.month) / 9.0) + date.day + 1721013.5 \
+                          + (date.hour + date.minute / 60.0 + date.second / 3600) / 24.0
+
+        return julian_datetime
+
+    def correct_pm(self):  # ra and dec arrays in degrees!
+        """
+        Corrects RA and DEC arrays (in degrees) for proper motion
+        """
+        ra_new = []
+        dec_new = []
+        for ra, dec, pmra, pmdec, time_po, time_pe in zip(self.rajd, self.decjd, self.pm_ra, self.pm_dec, self.time_pos, self.time_per):
+            now = self.get_julian_datetime() # get JD right now
+            # MJD = JD - 2,400,000.5
+            now = now - 2400000.5 # convert JD to MJD
+            time = time_po
+            # If no position time is given (either = 0.0), take period time or now as the time of observation
+            if time_po < 1:
+                time = time_pe
+            elif time_pe < 1:
+                time = now
+
+            # print("observed time mjd: {}".format(time))
+            # print("current mjd: {}".format(now))
+            years = (now - time) / 365
+            # print("years difference: {}".format(years))
+
+            # Correct for proper motion
+            ra = ra + (pmra * years)
+            dec = dec + (pmdec * years)
+            ra_new.append(ra)
+            dec_new.append(dec)
+        self.rajd = ra_new
+        self.decjd = dec_new
+        return
 
     def convert(self):
         """
@@ -98,14 +191,13 @@ class PulsarCatalog:
         1 RA min = 15'
         1 RA second = 15"
 
-        1 DEC second = 1"
-        1 DEC hour =
-
-        :param typ:
-        :return:
-
         Important note on DEC (+dd:mm:ss):
         DEC in degrees:arcminutes:arcseconds
+        1 DEC minute = 1'
+        1 DEC second = 1"
+
+        :param typ:
+        :return: error fixed and in degrees
         """
         xerrarr_fix = []
         for x, y_J, y_D, xerr in zip(self.raj, self.decj, self.decjd, xerrarr):
@@ -115,7 +207,7 @@ class PulsarCatalog:
                 xerrarr_fix.append(self.get_err_dec(y_J, xerr))
             else:
                 print("Invalid type input!")
-
+        np.set_printoptions(suppress=True)
         return np.round(np.asarray(xerrarr_fix, dtype=np.float64), 10)
 
     def get_err_ra(self, x, y, xerr):
@@ -142,7 +234,7 @@ class PulsarCatalog:
 
 
 class PulsarLimitedList(PulsarCatalog):
-    def __init__(self, type, min_snr, max_local, filename = "psr_snr_list_normalised.txt", fix_automatic=True):
+    def __init__(self, type, min_snr, max_local, filename="psr_snr_list_normalised.txt", fix_automatic=True):
         """
         :param filename: text file output from CHIME pulsar which is used as input
         Columns are: PSR, S/N, sigma(S/N), integration_time, normalised_snr, RA, Dec,
@@ -161,23 +253,23 @@ class PulsarLimitedList(PulsarCatalog):
         self.GBT = (self.type == "GBT")
 
         # Pulsar name replacements where these is a mismatch between the CHIME/ATNF names
-        self.pulsar_replacements = {"J1327+3423": "J1326+33", "J2228+3041": "J2227+30",
-                                    "J1629+43": "J1628+4406", "J2122+54": "J2123+5434",
-                                    "J1954+43": "J1954+4357", "J2017+59": "J2017+5906",
-                                    "J1748+59": "J1749+59", "J0742+4110": "J0740+41",
-                                    "J0325+67": "J0325+6744", "J1941+02": "J1940+0239",
-                                    "J1836+51": "J1836+5925"}
-        if fix_automatic:
-            self.filter_SNR()
-            self.filter_local()
-            self.save_csv()
 
+        if fix_automatic:
+            self.pulsar_replacements = {"J1327+3423": "J1326+33", "J2228+3041": "J2227+30",
+                                        "J1629+43": "J1628+4406", "J2122+54": "J2123+5434",
+                                        "J1954+43": "J1954+4357", "J2017+59": "J2017+5906",
+                                        "J1748+59": "J1749+59", "J0742+4110": "J0740+41",
+                                        "J0325+67": "J0325+6744", "J1941+02": "J1940+0239",
+                                        "J1836+51": "J1836+5925"}
+            self.filter_SNR()
+            self.filter_correct_local()
+            self.save_csv()
 
     def get_data_csv(self, filename):
         """
         Reads in data from a text file delimited by whitespace
         :param filename: location of text file, assumining delimiter is whitespace
-        :return: Pandas dataframe cont6ain ing file contents
+        :return: Pandas dataframe containing file contents
         """
         df = pandas.read_csv(filename, delim_whitespace=True)
         return df
@@ -204,14 +296,22 @@ class PulsarLimitedList(PulsarCatalog):
 
         # manually omitting pulsars that can not be paired to ATNF or are new
         self.df = df[(df.PSR != "J0534-13") & (df.PSR != "J0414+31") & (df.PSR != "J2022+2534") & (df.PSR != "J2044+28") & (
-                    df.PSR != "J2108+45") & (df.PSR != "J0406+3039") & (df.PSR != "J1239+32") & (df.PSR != "J1907+57")]
+                    df.PSR != "J2108+45") & (df.PSR != "J0406+3039") & (df.PSR != "J1239+32") & (df.PSR != "J1907+57") & (df.PSR != "J0854+54")
+                     & (df.PSR != "J1710+49") & (df.PSR != "J1829+25") & (df.PSR != "J1904+33") & (df.PSR != "J1647+66") & (df.PSR != "J0405+3347")]
         return
 
-    def filter_local(self):
+    def filter_correct_local(self):
+        """
+        Filters CHIME pulsar list for precise enough localization and corrects RA/DEC for PM
+        """
         df = self.df
         match_names = df["PSR"]
         ra_err_match = []
         dec_err_match = []
+
+        # Also replace RA/DEC with RA/DEC corrected for PM
+        ra_match = []
+        dec_match = []
         j_name_dict= self.j_name_dict_atnf
         b_name_dict = self.b_name_dict_atnf
 
@@ -220,9 +320,15 @@ class PulsarLimitedList(PulsarCatalog):
             if name in j_name_dict.keys():
                 ra_err_match.append(j_name_dict[name][0])
                 dec_err_match.append(j_name_dict[name][1])
+
+                ra_match.append(j_name_dict[name][2][0])
+                dec_match.append(j_name_dict[name][2][1])
             elif name in b_name_dict.keys():
                 ra_err_match.append(b_name_dict[name][0])
                 dec_err_match.append(b_name_dict[name][1])
+
+                ra_match.append(b_name_dict[name][2][0])
+                dec_match.append(b_name_dict[name][2][1])
             else:
                 print("{} pulsars successfully found".format(count))
                 print("{} not in either list!".format(name))
@@ -231,14 +337,17 @@ class PulsarLimitedList(PulsarCatalog):
 
         df["ra_err_mas"] = ra_err_match
         df["dec_err_mas"] = dec_err_match
+        df["RA"] = ra_match
+        df["Dec"] = dec_match
 
         # Filtering out pulsars with errors greater than max local or that are equal to 0
-        self.df = df[(df.ra_err_mas < self.max_local) & (df.dec_err_mas < self.max_local) & ((df.ra_err_mas != 0) | (df.dec_err_mas != 0))]
+        self.df = df[(df.ra_err_mas < self.max_local) & (df.dec_err_mas < self.max_local) & ((df.ra_err_mas > 0) | (df.dec_err_mas > 0))]
         return
 
     def get_RAs(self):
+        self.df["RA"] = self.df["RA"]/15
+        self.df["RA"] = self.df["RA"].astype(int)
         return self.df["RA"]
-
 
     def save_csv(self):
         self.df.sort_values(by="RA", inplace=True)
@@ -258,7 +367,7 @@ class PulsarLimitedList(PulsarCatalog):
         gbt_snr = normalized_snr * (np.cos(np.degrees(dec - gbt_latitude)) / np.cos(np.degrees(dec - chime_latitude)))
         return gbt_snr
 
-    def plotter(self, other_cat, name):
+    def plotter(self, other_cat, name, plot_name=None):
         plt.xlim([0, 23])
         ra_1 = self.get_RAs()
         ra_2 = other_cat.get_RAs()
@@ -267,6 +376,8 @@ class PulsarLimitedList(PulsarCatalog):
         plt.xlabel("RA (hours)")
         plt.ylabel("# of Pulsars")
         plt.legend()
+        if plot_name is not None:
+            plt.title(plot_name)
         plt.savefig("{}.png".format(name))
         plt.savefig("{}.pdf".format(name))
         plt.close()
