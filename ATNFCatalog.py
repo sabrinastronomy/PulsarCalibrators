@@ -5,18 +5,21 @@ import numpy as np
 import pandas
 import pyne2001
 from psrqpy import QueryATNF
+import math
 
 
 class RadioPulsarCatalog:
     """
-    Loads all data from the ATNF catalog and contains various methods to manipulate this data with users' desired constraints
+    Loads all data from the ATNF catalog and contains various methods to manipulate this data with users' desired constraints.
+    If you want specific pulsar parameters from the ATNF catalog, you can specify them with the wanted names parameter
+    to only return pulsars with those names.
     """
 
-    def __init__(self, download=False, correct_for_pm=True, th=True):
+    def __init__(self, download=False, correct_for_pm=True, th=True, wanted_names = []):
         if download:
             # Runs if you don't have a recently downloaded version of the ATNF catalog.
             # Turn this off if you already have a downloaded catalog as it slows the code down quite a bit.
-            query = QueryATNF()
+            query = QueryATNF(condition='!type(RRAT)', include_refs=True)
             query.save('all_ATNF.npy')
         else:
             # Loading the ATNF catalog from a .npy file. This won't work if you
@@ -29,10 +32,10 @@ class RadioPulsarCatalog:
         # Desired query parameters from the ATNF catalog saved version
         self.table = table = query.table
 
-        # RAJ: Right ascension(J2000)(hh:mm:ss.s)
-        # DecJ: Declination(J2000)(+dd:mm:ss)
-        self.raj = np.asarray(table['RAJ'])
-        self.decj = np.asarray(table['DECJ'])
+        # not PM corrected RAJ: Right ascension(J2000)(hh:mm:ss.s)
+        # not PM corrected DecJ: Declination(J2000)(+dd:mm:ss)
+        self.raj_UNCORRECTED = np.asarray(table['RAJ'])
+        self.decj_UNCORRECTED = np.asarray(table['DECJ'])
 
         # RAJD: Right ascension(J2000)(degrees)
         # DecJD: Declination(J2000)(degrees)
@@ -56,12 +59,12 @@ class RadioPulsarCatalog:
 
         # Mean flux density at 400 MHz (mJy)
         self.fluxes = np.asarray(table['S400'])
-        self.type = "Radio"
 
         #  B and J names of pulsars
         self.bnames = np.asarray(table['BNAME'])
         self.jnames = np.asarray(table['JNAME'])
         self.type = np.asarray(table['TYPE'])
+        self.type = ["Radio" if str(x) == "nan" else x for x in self.type]
 
         # Proper motion of RA in degrees
         pm_ra = np.asarray(table['PMRA'])
@@ -89,6 +92,7 @@ class RadioPulsarCatalog:
         time_per = np.asarray(table['PEPOCH'])
         self.time_per = np.nan_to_num(time_per)
 
+        self.references = np.asarray(table['SURVEY'])
         fluxes = np.asarray(table['S400'])
         self.fluxes = fluxes
         self.convert()
@@ -123,6 +127,25 @@ class RadioPulsarCatalog:
         if correct_for_pm:
             self.correct_pm()
 
+        # Getting specific ATNF pulsar corrected properties
+        wanted_data = {"bname": [], "jname": [], "ra (degrees)": [], "dec (degrees)": [], "ra_err (degrees)": [], "dec_err (degrees)": [], "pm_ra (degrees)": [], "pm_dec (degrees)": [], "pm_ra_err (degrees)": [], "pm_dec_err (degrees)": [], "type": [], "survey": []}
+        if len(wanted_names) > 0:
+            for bname, jname, ra, dec, ra_err, dec_err, pm_ra, pm_dec, pm_ra_err, pm_dec_err, type, survey in zip(self.bnames, self.jnames, self.rajd, self.decjd, self.raj_err, self.decj_err, self.pm_ra, self.pm_dec, self.pm_ra_err_deg, self.pm_dec_err_deg, self.type, self.references):
+                if bname in wanted_names or jname in wanted_names:
+                    wanted_data["bname"].append(bname)
+                    wanted_data["jname"].append(jname)
+                    wanted_data["ra (degrees)"].append(ra)
+                    wanted_data["dec (degrees)"].append(dec)
+                    wanted_data["ra_err (degrees)"].append(ra_err)
+                    wanted_data["dec_err (degrees)"].append(dec_err)
+                    wanted_data["pm_ra (degrees)"].append(pm_ra)
+                    wanted_data["pm_dec (degrees)"].append(pm_dec)
+                    wanted_data["pm_ra_err (degrees)"].append(pm_ra_err)
+                    wanted_data["pm_dec_err (degrees)"].append(pm_dec_err)
+                    wanted_data["type"].append(type)
+                    wanted_data["survey"].append(survey)
+        wanted_df = pandas.DataFrame(wanted_data)
+        wanted_df.to_csv("daniele_pulsar.csv")
 
     def convert_tau1GHz_tau400MHz(self, tau):
         """
@@ -145,7 +168,7 @@ class RadioPulsarCatalog:
             tau = self.convert_tau1GHz_tau400MHz(tau)
             self.tau_400_NE2001.append(tau)
         distance = distance * 3.086e19
-        thetas = (np.sqrt(tau * 3e8 / distance) * 180 / np.pi * 60 * 60) * 10 ** 3 # milliarcseconds
+        thetas = (np.sqrt((16 * tau * 3e8 * np.log(2)) / distance) * 180 / np.pi * 60 * 60) * 10 ** 3 # milliarcseconds
         return thetas
 
     def get_names_pos_unc(self):
@@ -157,16 +180,16 @@ class RadioPulsarCatalog:
         j_name_dict = {}
         b_name_dict = {}
         for bname, jname, ra_err, dec_err, pm_ra_err, pm_dec_err, pmra, pmdec, ra, dec, theta_ne2001, theta_ne2001DM, theta_atnf, distance, distance_dm, \
-            flux_density, l, b, tau_400, tau_400_ne2001 \
+            flux_density, l, b, tau_400, tau_400_ne2001, reference, type \
                 in zip(self.bnames, self.jnames, self.raj_err_mas, self.decj_err_mas, self.pm_ra_err_mas,
                        self.pm_dec_err_mas, self.pm_ra, self.pm_dec, self.rajd, self.decjd, self.theta_NE2001, self.theta_NE2001_DM, self.theta_atnf, self.distance, self.distance_DM,
-                       self.fluxes, self.glon, self.glat, self.tau_400, self.tau_400_NE2001):
+                       self.fluxes, self.glon, self.glat, self.tau_400, self.tau_400_NE2001, self.references, self.type):
             # Ad ding pm and RA/DEC errors in quadrature as total error in RA/DEC
 
             ra_err_quad = np.sqrt(ra_err**2 + pm_ra_err**2)
             dec_err_quad = np.sqrt(dec_err**2 + pm_dec_err**2)
-            b_name_dict[bname] = [ra_err_quad, dec_err_quad, (ra, dec), theta_ne2001, theta_atnf, distance, flux_density, (l, b), (ra_err, dec_err), (pmra, pmdec), (pm_ra_err, pm_dec_err), distance_dm, theta_ne2001DM, tau_400, tau_400_ne2001]
-            j_name_dict[jname] = [ra_err_quad, dec_err_quad, (ra, dec), theta_ne2001, theta_atnf, distance, flux_density, (l, b), (ra_err, dec_err), (pmra, pmdec), (pm_ra_err, pm_dec_err), distance_dm, theta_ne2001DM, tau_400, tau_400_ne2001]
+            b_name_dict[bname] = [ra_err_quad, dec_err_quad, (ra, dec), theta_ne2001, theta_atnf, distance, flux_density, (l, b), (ra_err, dec_err), (pmra, pmdec), (pm_ra_err, pm_dec_err), distance_dm, theta_ne2001DM, tau_400, tau_400_ne2001, reference, type]
+            j_name_dict[jname] = [ra_err_quad, dec_err_quad, (ra, dec), theta_ne2001, theta_atnf, distance, flux_density, (l, b), (ra_err, dec_err), (pmra, pmdec), (pm_ra_err, pm_dec_err), distance_dm, theta_ne2001DM, tau_400, tau_400_ne2001, reference, type]
         return b_name_dict, j_name_dict
 
     def get_julian_datetime(self):
@@ -259,15 +282,13 @@ class RadioPulsarCatalog:
         :return: error fixed and in degrees
         """
         xerrarr_fix = []
-        for x, y_J, y_D, xerr in zip(self.raj, self.decj, self.decjd, xerrarr):
+        for x, y_J, y_D, xerr in zip(self.raj_UNCORRECTED, self.decj_UNCORRECTED, self.decjd, xerrarr):
             if typ is 'ra':
                 xerrarr_fix.append(self.get_err_ra(x, y_D, xerr))
             elif typ is 'dec':
                 xerrarr_fix.append(self.get_err_dec(y_J, xerr))
             else:
                 print("Invalid type input!")
-                sys.exit()
-        # np.set_printoptions(suppress=True)
         return np.round(np.asarray(xerrarr_fix, dtype=np.float64), 10)
 
     def get_err_ra(self, x, y, xerr):
@@ -294,7 +315,7 @@ class RadioPulsarCatalog:
 
 
 class PulsarLimitedList(RadioPulsarCatalog):
-    def __init__(self, type, min_snr, max_local, max_theta, filename="psr_snr_list_normalised.txt", fix_automatic=True):
+    def __init__(self, location, min_snr, max_local, max_theta, filename="psr_snr_list_normalised.txt", filename_dutycycle = "psr_dc.txt", fix_automatic=True):
         """
         :param filename: text file output from CHIME pulsar which is used as input
         Columns are: PSR, S/N, sigma(S/N), integration_time, normalised_snr, RA, Dec,
@@ -314,12 +335,16 @@ class PulsarLimitedList(RadioPulsarCatalog):
                                     "J2001+42": "J2001+4258", "J1840-04": "J1840-0445", "J1920-09": "J1920-0950",
                                     "J1900-09": "J1900-0933"}
 
-        self.df = self.get_data_csv(filename)
+        self.df = self.get_data_csv_whitespace(filename)
+        self.df_dutycycle = pandas.read_csv (filename_dutycycle, sep=",")
+        self.dc_dict = {}
+        for row in self.df_dutycycle.itertuples():
+            self.dc_dict[row[1]] = row[2]
         self.max_local = max_local
         self.min_snr = min_snr
         self.b_name_dict_atnf, self.j_name_dict_atnf = self.get_names_pos_unc()
-        self.type = type
-        self.GBT = (self.type == "GBT")
+        self.location = location
+        self.GBT = (self.location == "GBT")
         self.new_df = "empty" # where corrected data will be stored for constrained pulsars
         self.max_theta = max_theta
 
@@ -332,7 +357,7 @@ class PulsarLimitedList(RadioPulsarCatalog):
             self.filter_theta()
             self.save_csv()
 
-    def get_data_csv(self, filename):
+    def get_data_csv_whitespace(self, filename):
         """
         Reads in data from a text file delimited by whitespace
         :param filename: location of text file, assumining delimiter is whitespace
@@ -341,13 +366,17 @@ class PulsarLimitedList(RadioPulsarCatalog):
         df = pandas.read_csv(filename, delim_whitespace=True)
         return df
 
-    def helper_combine(self, helper_dict, ra_iftransit, name, name_full, snr):
+    def helper_combine(self, helper_dict, ra_iftransit, name, name_full, CHIME_name, snr):
         self.snr_match.append(snr)
         self.name_match.append(name_full)
         if "_" in name_full:
             self.ra_match.append(ra_iftransit * 15)
         else:
             self.ra_match.append(helper_dict[name][2][0])
+        if CHIME_name in self.dc_dict.keys():
+            self.dc_match.append(self.dc_dict[CHIME_name])
+        else:
+            self.dc_match.append(" ")
         self.ra_err_match.append(helper_dict[name][0])
         self.dec_err_match.append(helper_dict[name][1])
         self.dec_match.append(helper_dict[name][2][1])
@@ -367,16 +396,22 @@ class PulsarLimitedList(RadioPulsarCatalog):
         self.theta_NE2001_DM_match.append(helper_dict[name][12])
         self.tau_400_match.append(helper_dict[name][13])
         self.tau_400_NE2001_match.append(helper_dict[name][14])
+        self.references_match.append(helper_dict[name][15])
+        self.type_match.append(helper_dict[name][16])
+
 
 
     def combine_atnf_chime(self):
+        CHIME_names = self.df["PSR"].copy() # original pulsar names before replacements
         self.df["PSR"].replace(self.pulsar_replacements, inplace=True)
 
-        match_names_full = self.df["PSR"]
-        match_names = [n.split("_")[0] for n in self.df.PSR]
+        match_names_full = self.df["PSR"] # CHIME names with ATNF name replacements and including transit indication in name
+        match_names = [n.split("_")[0] for n in self.df.PSR] # CHIME names with ATNF name replacements not including transit indication in name
 
         match_snrs = self.df.normalised_snr
         ra_chime = self.df.RA
+
+        self.dc_match = []
 
         self.ra_err_match = []
         self.dec_err_match = []
@@ -404,17 +439,20 @@ class PulsarLimitedList(RadioPulsarCatalog):
         self.distance_DM_match = []
         self.tau_400_match = []
         self.tau_400_NE2001_match = []
+        self.references_match = []
+        self.type_match = []
 
         count = 0
-        for name_full, name, snr, ra in zip(match_names_full, match_names, match_snrs, ra_chime):
+        for name_full, name, CHIME_name, snr, ra in zip(match_names_full, match_names, CHIME_names, match_snrs, ra_chime):
             if name in j_name_dict.keys():
                 count += 1
-                self.helper_combine(j_name_dict, ra, name, name_full, snr)
+                self.helper_combine(j_name_dict, ra, name, name_full, CHIME_name, snr)
             elif name in b_name_dict.keys():
                 count += 1
-                self.helper_combine(b_name_dict, ra, name, name_full, snr)
+                self.helper_combine(b_name_dict, ra, name, name_full, CHIME_name, snr)
             else:
                 self.df[(self.df.PSR != name)]
+
         print("{} pulsars successfully found".format(count))
         data = {"names" : self.name_match, "RA": self.ra_match, "RA (degrees)": self.ra_match, "Dec": self.dec_match,
                 "RA_err (mas)": self.ra_err_act_match, "Dec_err (mas)": self.dec_err_act_match,
@@ -422,10 +460,10 @@ class PulsarLimitedList(RadioPulsarCatalog):
                 "PM RA_err (mas)": self.pmra_err_match, "PM Dec_err (mas)": self.pmdec_err_match,
                 "ra_err_mas": self.ra_err_match, "dec_err_mas": self.dec_err_match,
                 "l (degrees)": self.l_match, "b (degrees)": self.b_match,
-                "snr": self.snr_match, "Mean Flux Density (400MHz from ATNF) (mJy)": self.flux_densities_match,
+                "snr": self.snr_match, "Rough Duty Cycle": self.dc_match, "Mean Flux Density (400MHz from ATNF) (mJy)": self.flux_densities_match,
                 "scat_disk_atnf": self.theta_match_atnf, "scat_disk_ne2001": self.theta_match_ne2001, "scat_disk_ne2001dm": self.theta_NE2001_DM_match,
                 "ATNF Distance (kpc)": self.distances_match, "ATNF Distance only from DM (kpc)": self.distance_DM_match,
-                "tau ATNF (400 MHz) (ms)": self.tau_400_match, "tau NE2001 (400 MHz) (ms)": self.tau_400_NE2001_match}
+                "tau ATNF (400 MHz) (ms)": self.tau_400_match, "tau NE2001 (400 MHz) (ms)": self.tau_400_NE2001_match, "Survey": self.references_match, "Type": self.type_match}
         self.new_df = pandas.DataFrame(data)
         return
 
@@ -459,8 +497,8 @@ class PulsarLimitedList(RadioPulsarCatalog):
             self.new_df = self.new_df[(np.sqrt(new_df.ra_err_mas**2 + new_df.dec_err_mas**2) < self.max_local) & ((new_df.ra_err_mas > 0) | (new_df.dec_err_mas > 0))]
         return
 
-    def get_RAs(self, integer=True):
-        # RETURNS RA IN Hour Angle
+    def get_RAs(self, integer=False):
+        # Returns RA in hour angle
         if integer:
             self.new_df["RA"] = self.new_df["RA"].astype(int)
         return self.new_df["RA"]
@@ -490,14 +528,14 @@ class PulsarLimitedList(RadioPulsarCatalog):
 
     def save_csv(self):
         self.new_df.sort_values(by="RA", inplace=True)
-        print(self.new_df["RA"].astype(int).value_counts())
+        # print(self.new_df["RA"].value_counts())
         saving_df = self.new_df.rename(columns={"snr":"CHIME SNR (normalized to 10 min integration time)",
                                 "RA":"RA (hours)", "Dec":"DEC (degrees)", "ra_err_mas":'"Total" RA_err (mas): combining both location and PM error',
                                 "dec_err_mas":'"Total" DEC_err (mas): combining both location and PM error', "scat_disk_atnf":"Scat. Disk (ATNF) (mas)",
                                                 "scat_disk_ne2001dm": "Scat. Disk (NE2001 from ATNF DM distance) (mas)",
                                                 "scat_disk_ne2001":"Scat. Disk (NE2001 from ATNF Distance) (mas)"})
         # del saving_df["PSR"]
-        saving_df.to_csv("pulsars_snr_{}_loc_{}_scat_{}_{}.csv".format(self.min_snr, self.max_local, self.max_theta, self.type), index=False)
+        saving_df.to_csv("pulsars_snr_{}_loc_{}_scat_{}_{}.csv".format(self.min_snr, self.max_local, self.max_theta, self.location), index=False)
 
     def get_gbt_snr_from_CHIME(self, normalized_snr, dec):
         """
@@ -514,7 +552,7 @@ class PulsarLimitedList(RadioPulsarCatalog):
 
         plt.xlim([0, 23])
         plt.xticks(ticks=np.linspace(0, 24, bin/2 + 1))
-        ra_1.plot.hist(bins=bin, color="blue", edgecolor = 'black', label="{} S/N > {}, $loc_{{err}}$ < {} mas".format(self.type, self.min_snr, self.max_local))
+        ra_1.plot.hist(bins=bin, color="blue", edgecolor = 'black', label="{} S/N > {}, $loc_{{err}}$ < {} mas".format(self.location, self.min_snr, self.max_local))
         ra_2.plot.hist(bins=bin, color="orange", edgecolor='black', label="{} S/N > {}, $loc_{{err}}$ < {} mas".format(other_cat.type, other_cat.min_snr, other_cat.max_local))
         plt.xlabel("RA (hours)")
         plt.ylabel("# of Pulsars")
@@ -533,12 +571,11 @@ class PulsarLimitedList(RadioPulsarCatalog):
             ra_1 = self.get_RAs(integer=True)
         else:
             ra_1 = self.get_RAs()
-        print("Total number of pulsars: {} for {} S/N > {}, $loc_{{err}}$ < {} mas, $theta_{{scat}}$ < {} mas".format(len(ra_1), self.type, self.min_snr, self.max_local, self.max_theta))
+        print("Total number of pulsars: {} for {} S/N > {}, $loc_{{err}}$ < {} mas, $\theta_{{scat}}$ < {} mas".format(len(ra_1), self.location, self.min_snr, self.max_local, self.max_theta))
         if loc:
-            print()
-            ra_1.plot.hist(bins=bin, color ="blue", edgecolor = 'black', label="{} S/N > {}, $loc_{{err}}$ < {} mas, $theta_{{scat}}$ < {} mas".format(self.type, self.min_snr, self.max_local, self.max_theta))
+            ra_1.plot.hist(bins=bin, color ="blue", edgecolor = 'black', label=r"{} S/N > {}, $loc_{{err}}$ < {} mas, $\theta_{{scat}}$ < {} mas".format(self.location, self.min_snr, self.max_local, self.max_theta))
         else:
-            ra_1.plot.hist(bins=bin, color ="blue", edgecolor = 'black', label="{} S/N > {}, $theta_{{scat}}$ < {} mas".format(self.type, self.min_snr, self.max_local, self.max_theta))
+            ra_1.plot.hist(bins=bin, color ="blue", edgecolor = 'black', label="r{} S/N > {}, $\theta_{{scat}}$ < {} mas".format(self.location, self.min_snr, self.max_theta))
         plt.xlabel("RA (hours)")
         plt.ylabel("# of Pulsars")
         plt.legend()
@@ -562,7 +599,7 @@ class PulsarLimitedList(RadioPulsarCatalog):
         quick = np.argmax(np.asarray(snr_1), axis=0)
         ts_1[quick] = 3
         quicker = np.argmax(np.asarray(thetas_1), axis=0)
-        print("max: {}".format(names[quicker]))
+        # print("max: {}".format(names[quicker]))
         cm = plt.cm.get_cmap('viridis')
         plt.xlim([0, 23])
         plt.xticks(ticks=np.linspace(0, 24, 25))
