@@ -1,5 +1,5 @@
 # PulsarCalibrators
-Code to analyze both ATNF and CHIME data and constrain the pulsars that are suitable calibrators.
+Code to analyze both ATNF and CHIME data and constrain pulsars that are suitable calibrators.
 
 Dependencies: 
 - matplotlib
